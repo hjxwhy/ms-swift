@@ -12,6 +12,7 @@ import torch
 from PIL import Image
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from decord import VideoReader
 
 from swift.utils import get_env_args
 
@@ -120,6 +121,38 @@ def load_file(path: Union[str, bytes, _T]) -> Union[BytesIO, _T]:
                 content = response.content
                 res = BytesIO(content)
 
+        elif "open-x" in path and "videos" in path:
+            # Handle open-x video frame extraction
+            ROOT_IMAGE_DIR = get_env_args('ROOT_IMAGE_DIR', str, None)
+            if ROOT_IMAGE_DIR is not None and not os.path.exists(path):
+                path = os.path.join(ROOT_IMAGE_DIR, path)
+            video_path = os.path.join(os.path.dirname(path) + ".mp4")
+            image_id = int(os.path.basename(path).split(".")[0])
+            video_reader = VideoReader(video_path)
+            video_frames = video_reader.get_batch([image_id])
+            image = Image.fromarray(video_frames.asnumpy()[0])
+            # Convert PIL Image to BytesIO
+            img_byte_arr = BytesIO()
+            image.save(img_byte_arr, format='PNG')
+            img_byte_arr.seek(0)
+            res = img_byte_arr
+        elif "galaxea/subtask_video" in path and ":" in path:
+            # Handle galaxea subtask video frame extraction
+            ROOT_IMAGE_DIR = get_env_args('ROOT_IMAGE_DIR', str, None)
+            if ROOT_IMAGE_DIR is not None:
+                video_path, image_id = path.split(":")
+                if not os.path.exists(video_path):
+                    video_path = os.path.join(ROOT_IMAGE_DIR, video_path)
+            else:
+                video_path, image_id = path.split(":")
+            video_reader = VideoReader(video_path)
+            video_frames = video_reader.get_batch([int(image_id)])
+            image = Image.fromarray(video_frames.asnumpy()[0])
+            # Convert PIL Image to BytesIO
+            img_byte_arr = BytesIO()
+            image.save(img_byte_arr, format='PNG')
+            img_byte_arr.seek(0)
+            res = img_byte_arr
         elif os.path.exists(path) or (not path.startswith('data:') and len(path) <= 200):
             ROOT_IMAGE_DIR = get_env_args('ROOT_IMAGE_DIR', str, None)
             if ROOT_IMAGE_DIR is not None and not os.path.exists(path):

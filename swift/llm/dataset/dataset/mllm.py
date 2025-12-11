@@ -1306,3 +1306,37 @@ register_dataset(
         hf_dataset_id='leonardPKU/clevr_cogen_a_train',
         preprocess_func=ClevrPreprocessor(),
         tags=['qa', 'math', 'vision', 'grpo']))
+
+class FineVisionPreprocessor(MessagesPreprocessor):
+
+    def preprocess(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        messages = row['messages']
+        rounds = []
+        for msg in messages:
+            rounds.append({'role': "user", 'content': msg['user']})
+            rounds.append({'role': "assistant", 'content': msg['assistant']})
+        row['messages'] = rounds
+        # if len(row.get("images", [])) < 1:
+        #     row.pop("images")
+        return super().preprocess(row)
+
+from datasets import get_dataset_config_names
+register_dataset(
+    DatasetMeta(
+        ms_dataset_id='AI-ModelScope/FineVision',
+        hf_dataset_id='HuggingFaceM4/FineVision',
+        dataset_path='/cpfs01/cpfs01/datas/FineVisionMax',
+        preprocess_func=FineVisionPreprocessor(
+            columns={'texts': 'messages'}
+        ),
+        split=['train'],
+        subsets=get_dataset_config_names('/cpfs01/cpfs01/datas/FineVisionMax'),
+        tags=['multi-modal', 'en', 'vqa', 'quality']))
+
+register_dataset(
+    DatasetMeta(
+        ms_dataset_id='vlm_mix_robot_openx_training_v5_galaxea',
+        hf_dataset_id='vlm_mix_robot_openx_training_v5_galaxea',
+        dataset_path='/cpfs01/cpfs01/datas/vlm_dataset/vlm_mix_robot_openx_training_v5_galaxea',
+        preprocess_func=MessagesPreprocessor(),
+        split=['train']))

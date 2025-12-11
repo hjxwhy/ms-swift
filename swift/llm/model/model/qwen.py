@@ -817,6 +817,7 @@ register_model(
 def get_model_tokenizer_qwen2_5_vl(*args, **kwargs):
     from transformers import Qwen2_5_VLForConditionalGeneration
     kwargs['automodel_class'] = kwargs['automodel_class'] or Qwen2_5_VLForConditionalGeneration
+    kwargs["_check_qwen_vl_utils"] = False
     return get_model_tokenizer_qwen2_vl(*args, **kwargs)
 
 

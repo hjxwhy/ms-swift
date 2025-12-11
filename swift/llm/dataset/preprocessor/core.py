@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import ast
+import io
 import os
 from collections import Counter
 from contextlib import contextmanager
@@ -12,6 +13,7 @@ from datasets import Image
 from datasets import IterableDataset as HfIterableDataset
 from datasets import Sequence, Value
 from modelscope.hub.utils.utils import get_cache_dir
+from PIL import Image as PILImage
 
 from swift.llm import history_to_messages
 from swift.utils import get_logger, is_dist, is_master, safe_ddp_context
@@ -82,13 +84,53 @@ class RowPreprocessor:
             if images is None:
                 continue
 
-            if isinstance(images, str) or (isinstance(images, list) and images and isinstance(images[0], str)):
-                if isinstance(images, str):
-                    images = [images]
-                for i, image in enumerate(images):
-                    images[i] = {'bytes': None, 'path': image}
-                row[key] = images
+            # Handle PIL.Image objects
+            if isinstance(images, PILImage.Image):
+                # Single PIL.Image -> convert to dict format
+                bytes_io = io.BytesIO()
+                images.save(bytes_io, format='PNG')
+                bytes_data = bytes_io.getvalue()
+                row[key] = [{'bytes': bytes_data, 'path': None}]
+            elif isinstance(images, list) and images:
+                # Check if it's a list of PIL.Image objects
+                if isinstance(images[0], PILImage.Image):
+                    converted_images = []
+                    for image in images:
+                        bytes_io = io.BytesIO()
+                        image.save(bytes_io, format='PNG')
+                        bytes_data = bytes_io.getvalue()
+                        converted_images.append({'bytes': bytes_data, 'path': None})
+                    row[key] = converted_images
+                # Handle list of strings
+                elif isinstance(images[0], str):
+                    for i, image in enumerate(images):
+                        media_path = image
+                        if "uniree" in media_path:
+                            media_path = media_path.replace("uniree", "unitree")
+                        if "open-x" in media_path:
+                            media_path = media_path.replace("train_v3", "train")
+                            data_names = ["berkeley_autolab_ur5", "bridge", "fractal20220817_data", "jaco_play", "libero"]
+                            if any(data_name in media_path for data_name in data_names):
+                                pass
+                            elif "bbox_3d_extracted" not in media_path:
+                                media_path = media_path.replace(".jpg", ".mp4")
+                        if not media_path.endswith(".mp4") and os.path.isfile(media_path):
+                            images[i] = {'bytes': None, 'path': media_path}
+                        elif ":" in media_path:
+                            images[i] = {'bytes': None, 'path': media_path}
+                        elif media_path.endswith(".mp4"):
+                            images[i] = {'bytes': None, 'path': media_path}
+                        else:
+                            images[i] = {'bytes': None, 'path': media_path}
+                    row[key] = images
+                else:
+                    # Keep as is if already in correct format
+                    pass
+            elif isinstance(images, str):
+                # Single string -> convert to list format
+                row[key] = [{'bytes': None, 'path': images}]
             elif isinstance(images, dict):
+                # Single dict -> wrap in list
                 row[key] = [images]
 
         for key in ['videos', 'audios']:
