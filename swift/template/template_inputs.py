@@ -26,6 +26,7 @@ class StdTemplateInputs:
     videos: List[str] = field(default_factory=list)
     audios: List[str] = field(default_factory=list)
     objects: Dict[str, Any] = field(default_factory=dict)
+    robot_states: List[List[float]] = field(default_factory=list)
 
     margin: Optional[float] = None  # for reward modeling
     mm_processor_kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -43,6 +44,10 @@ class StdTemplateInputs:
             self.videos = [self.videos]
         if self.audios and not isinstance(self.audios, (list, tuple)):
             self.audios = [self.audios]
+        if self.robot_states is None:
+            self.robot_states = []
+        elif self.robot_states and all(isinstance(x, (int, float)) for x in self.robot_states):
+            self.robot_states = [self.robot_states]
 
     def to_history(self):
         if not self.messages:
@@ -51,13 +56,13 @@ class StdTemplateInputs:
 
     @property
     def is_multimodal(self):
-        return bool(self.images or self.audios or self.videos or self.objects)
+        return bool(self.images or self.audios or self.videos or self.objects or self.robot_states)
 
     @classmethod
     def from_dict(cls, inputs: Dict[str, Any]) -> 'StdTemplateInputs':
         inputs = deepcopy(inputs)
         kwargs = {}
-        for key in ['label', 'channel', 'margin', 'rejected_response']:
+        for key in ['label', 'channel', 'margin', 'rejected_response', 'robot_states']:
             if key in inputs:
                 kwargs[key] = inputs[key]
         messages = inputs['messages']

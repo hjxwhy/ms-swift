@@ -88,6 +88,7 @@ class InferRequest:
     images: List[Union[str, Image.Image]] = field(default_factory=list)
     audios: List[str] = field(default_factory=list)
     videos: List[str] = field(default_factory=list)
+    robot_states: List[List[float]] = field(default_factory=list)
 
     tools: Optional[List[Tool]] = None
     objects: Dict[str, Any] = field(default_factory=dict)
@@ -97,6 +98,11 @@ class InferRequest:
             val = getattr(self, key)
             if isinstance(val, str):
                 setattr(self, key, [val])
+        if self.robot_states is None:
+            self.robot_states = []
+        elif self.robot_states and all(isinstance(x, (int, float, np.integer, np.floating))
+                                       for x in self.robot_states):
+            self.robot_states = [self.robot_states]
         assert isinstance(self.messages, list), f'messages: {self.messages}'
 
     @staticmethod
@@ -255,6 +261,7 @@ class MultiModalRequestMixin:
     audios: List[str] = field(default_factory=list)
     videos: List[str] = field(default_factory=list)
     objects: Dict[str, Any] = field(default_factory=dict)
+    robot_states: List[List[float]] = field(default_factory=list)
 
     @staticmethod
     def to_base64(mm_data: Union[str, Image.Image, bytes]) -> str:
@@ -284,6 +291,11 @@ class MultiModalRequestMixin:
                 setattr(self, key, values)
             for i, val in enumerate(values):
                 values[i] = self.to_base64(val)
+        if self.robot_states is None:
+            self.robot_states = []
+        elif self.robot_states and all(isinstance(x, (int, float, np.integer, np.floating))
+                                       for x in self.robot_states):
+            self.robot_states = [self.robot_states]
 
 
 @dataclass

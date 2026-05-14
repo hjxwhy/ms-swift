@@ -21,6 +21,7 @@ from .model_meta import MODEL_MAPPING, BaseModelLoader, ModelInfo, ModelMeta, ge
 from .patcher import (get_lm_head_model, patch_attach_align_device_hook_on_blocks, patch_automodel,
                       patch_automodel_for_sequence_classification, patch_get_dynamic_module, patch_module_forward,
                       patch_mp_ddp, patch_tp_plan)
+from .robot_state import ROBOT_STATE_TOKEN, add_robot_state_projector
 from .utils import AttnImpl, InitModelStrategy, get_default_device_map
 
 logger = get_logger()
@@ -173,6 +174,9 @@ class ModelLoader(BaseModelLoader):
         auto_model_cls=None,
         return_dummy_model: bool = False,
         new_special_tokens: Optional[List[str]] = None,
+        robot_state_dim: Optional[int] = None,
+        robot_state_projector_hidden_size: Optional[int] = None,
+        robot_state_token: Optional[str] = None,
         model_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
@@ -195,7 +199,15 @@ class ModelLoader(BaseModelLoader):
         self.auto_config_cls = None
         self.auto_tokenizer_cls = None
         self.return_dummy_model = return_dummy_model
+        if robot_state_dim is not None:
+            robot_state_token = robot_state_token or ROBOT_STATE_TOKEN
+            new_special_tokens = list(new_special_tokens or [])
+            if robot_state_token not in new_special_tokens:
+                new_special_tokens.append(robot_state_token)
         self.new_special_tokens = new_special_tokens
+        self.robot_state_dim = robot_state_dim
+        self.robot_state_projector_hidden_size = robot_state_projector_hidden_size
+        self.robot_state_token = robot_state_token
         self.model_kwargs = model_kwargs
         self.patch_offload = kwargs.pop('patch_offload', False)
         self.init_strategy = kwargs.get('init_strategy')
@@ -471,11 +483,34 @@ class ModelLoader(BaseModelLoader):
         with patch_get_dynamic_module(), patch_tp_plan(self.load_model), patch_offload_context:
             config = self.get_config(model_dir)
             self._postprocess_config(config)
+            self.robot_state_dim = self.robot_state_dim or getattr(config, 'robot_state_dim', None)
+            self.robot_state_projector_hidden_size = self.robot_state_projector_hidden_size or getattr(
+                config, 'robot_state_projector_hidden_size', None)
+            self.robot_state_token = self.robot_state_token or getattr(config, 'robot_state_token', None)
+            if self.robot_state_dim is not None:
+                robot_state_token = self.robot_state_token or ROBOT_STATE_TOKEN
+                config.robot_state_dim = self.robot_state_dim
+                config.robot_state_projector_hidden_size = self.robot_state_projector_hidden_size
+                config.robot_state_token = robot_state_token
+                self.new_special_tokens = list(self.new_special_tokens or [])
+                if robot_state_token not in self.new_special_tokens:
+                    self.new_special_tokens.append(robot_state_token)
             model, processor = self._get_model_processor(model_dir, config)
             self._postprocess_processor(processor)
             if model:
                 self._postprocess_model(model_dir, model)
         self._add_new_special_tokens(model, processor, config)
+        if model:
+            if self.robot_state_dim is not None:
+                tokenizer = self._get_tokenizer(processor)
+                model.config.robot_state_token_id = tokenizer.convert_tokens_to_ids(
+                    self.robot_state_token or ROBOT_STATE_TOKEN)
+            add_robot_state_projector(
+                model,
+                self.robot_state_dim,
+                self.robot_state_projector_hidden_size,
+                token=self.robot_state_token,
+                model_dir=model_dir)
         return model, processor
 
 
@@ -529,6 +564,9 @@ def get_model_processor(
     max_model_len: Optional[int] = None,
     auto_model_cls=None,
     new_special_tokens: Optional[List[str]] = None,
+    robot_state_dim: Optional[int] = None,
+    robot_state_projector_hidden_size: Optional[int] = None,
+    robot_state_token: Optional[str] = None,
     task_type: Literal['causal_lm', 'seq_cls', 'embedding', 'reranker', 'generative_reranker'] = None,
     num_labels: Optional[int] = None,
     problem_type: Literal['regression', 'single_label_classification', 'multi_label_classification'] = None,
@@ -620,6 +658,9 @@ def get_model_processor(
         auto_model_cls=auto_model_cls,
         return_dummy_model=return_dummy_model,
         new_special_tokens=new_special_tokens,
+        robot_state_dim=robot_state_dim,
+        robot_state_projector_hidden_size=robot_state_projector_hidden_size,
+        robot_state_token=robot_state_token,
         model_kwargs=model_kwargs,
         **kwargs)
     return loader.load()

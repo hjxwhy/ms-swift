@@ -149,6 +149,8 @@ def prepare_adapter(args: SftArguments, model, *, template=None, train_dataset=N
     task_type = (task_type or args.task_type).upper()
     target_modules = get_target_modules(args, model)
     modules_to_save = get_modules_to_save(args, model, task_type)
+    if getattr(args, 'robot_state_dim', None) is not None and 'robot_state_projector' not in modules_to_save:
+        modules_to_save.append('robot_state_projector')
     lora_kwargs = {
         'r': args.lora_rank,
         'target_modules': target_modules,

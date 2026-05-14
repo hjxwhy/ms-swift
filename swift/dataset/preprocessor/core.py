@@ -19,7 +19,7 @@ DATASET_TYPE = Union[HfDataset, HfIterableDataset]
 
 logger = get_logger()
 
-_pair_keys = ['messages', 'images', 'videos', 'audios', 'tools', 'objects']
+_pair_keys = ['messages', 'images', 'videos', 'audios', 'tools', 'objects', 'robot_states']
 
 
 class RowPreprocessor:
@@ -45,10 +45,13 @@ class RowPreprocessor:
         images_keys = ['images', 'image']
         audios_keys = ['audios', 'audio']
         videos_keys = ['videos', 'video']
+        robot_states_keys = ['robot_states', 'robot_state', 'states', 'state']
         for mm_type in ['images', 'audios', 'videos']:
             keys = locals()[f'{mm_type}_keys']
             for key in keys:
                 self.columns[key] = mm_type
+        for key in robot_states_keys:
+            self.columns[key] = 'robot_states'
 
         self.traceback_limit = traceback_limit
         self._traceback_counter = 0
@@ -97,6 +100,47 @@ class RowPreprocessor:
                 continue
             elif isinstance(mm_data, str):
                 row[key] = [mm_data]
+
+    @staticmethod
+    def _cast_robot_states(row: Dict[str, Any]) -> None:
+        for key in ['robot_states', 'rejected_robot_states', 'positive_robot_states', 'negative_robot_states']:
+            if key in row:
+                RowPreprocessor._cast_one_robot_states(row, key)
+
+    @staticmethod
+    def _cast_one_robot_states(row: Dict[str, Any], key: str) -> None:
+        robot_states = row.get(key)
+        if robot_states is None:
+            return
+        if isinstance(robot_states, str):
+            robot_states = ast.literal_eval(robot_states)
+        if hasattr(robot_states, 'detach'):
+            robot_states = robot_states.detach().cpu().tolist()
+        elif isinstance(robot_states, np.ndarray):
+            robot_states = robot_states.tolist()
+        if not isinstance(robot_states, (list, tuple)):
+            raise TypeError(f'robot_states must be a list, got: {type(robot_states)}')
+        if len(robot_states) == 0:
+            row[key] = []
+            return
+        if all(isinstance(x, (int, float, np.integer, np.floating)) for x in robot_states):
+            robot_states = [robot_states]
+        new_states = []
+        state_dim = None
+        for state in robot_states:
+            if hasattr(state, 'detach'):
+                state = state.detach().cpu().tolist()
+            elif isinstance(state, np.ndarray):
+                state = state.tolist()
+            if not isinstance(state, (list, tuple)):
+                raise TypeError(f'each robot state must be a list, got: {type(state)}')
+            state = [float(x) for x in state]
+            if state_dim is None:
+                state_dim = len(state)
+            elif len(state) != state_dim:
+                raise ValueError(f'robot state dimensions are inconsistent: {state_dim} vs {len(state)}')
+            new_states.append(state)
+        row[key] = new_states
 
     @staticmethod
     def _check_rejected_response(row: Dict[str, Any]) -> None:
@@ -186,6 +230,7 @@ class RowPreprocessor:
                     self._check_rejected_response(r)
                     self._check_messages(r)
                     self._cast_mm_data(r)
+                    self._cast_robot_states(r)
             except Exception as e:
                 if strict:
                     logger.warning('To avoid errors, you can pass `strict=False`.')
@@ -266,6 +311,8 @@ class RowPreprocessor:
                 features['positive_messages'] = [messages_feature]
                 features['negative_messages'] = [messages_feature]
                 features['images'] = [{'bytes': Value(dtype='binary'), 'path': Value(dtype='string')}]
+                features['robot_states'] = Sequence(
+                    feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1)
                 features['objects'] = {
                     'ref': Sequence(feature=Value(dtype='string'), length=-1),
                     'bbox': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),

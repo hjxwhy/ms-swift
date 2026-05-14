@@ -52,12 +52,16 @@ class Template(ProcessorMixin):
     - Various inference engines (Transformers, vLLM, LMDeploy, SGLang)
     - Advanced features like padding-free training, sequence parallelism, and loss scaling
     """
-    special_tokens = ['<image>', '<video>', '<audio>', '<bbox>', '<ref-object>', '<cot-process>', '<start-image>']
-    special_keys = ['images', 'videos', 'audios', 'objects']
+    special_tokens = [
+        '<image>', '<video>', '<audio>', '<bbox>', '<ref-object>', '<cot-process>', '<start-image>',
+        '<|robot_state|>'
+    ]
+    special_keys = ['images', 'videos', 'audios', 'objects', 'robot_states']
 
     image_placeholder = ['<image>']
     video_placeholder = ['<video>']
     audio_placeholder = ['<audio>']
+    robot_state_token = '<|robot_state|>'
     cot_process_placeholder = ['ки']
     placeholder_tokens = []  # For clearer printing
     load_images = True
@@ -206,10 +210,18 @@ class Template(ProcessorMixin):
         if self.model_meta.is_multimodal:
             logger.info(f'norm_bbox: {self.norm_bbox}')
         tokenizer = self.tokenizer
+        self.robot_state_token = getattr(self.config, 'robot_state_token', None) or self.robot_state_token
+        self.special_tokens = list(self.special_tokens)
+        if self.robot_state_token not in self.special_tokens:
+            self.special_tokens.append(self.robot_state_token)
 
         for i, token in enumerate(self.placeholder_tokens):
             if isinstance(token, str):
                 self.placeholder_tokens[i] = tokenizer.convert_tokens_to_ids(token)
+        self.robot_state_token_id = tokenizer.convert_tokens_to_ids(self.robot_state_token)
+        if (self.robot_state_token_id == getattr(tokenizer, 'unk_token_id', None)
+                and self.robot_state_token not in getattr(tokenizer, 'get_vocab', lambda: {})()):
+            self.robot_state_token_id = None
         self.template_meta.init(tokenizer)
         self.init_env_args()
 
@@ -797,8 +809,7 @@ class Template(ProcessorMixin):
 
         return res, res_loss_scale
 
-    @staticmethod
-    def _split_special_tokens(context_list: List[Context],
+    def _split_special_tokens(self, context_list: List[Context],
                               loss_scale_list: List[float]) -> Tuple[List[Context], List[float]]:
         """Split special tokens, for example `<image>`, `<video>`, this will help the replace_tag operation"""
         res: List[Context] = []
@@ -806,7 +817,7 @@ class Template(ProcessorMixin):
         for context, loss_scale in zip(context_list, loss_scale_list):
             contexts = []
             if isinstance(fetch_one(context), str):
-                for d in split_str_parts_by(context, Template.special_tokens):
+                for d in split_str_parts_by(context, self.special_tokens):
                     contexts.extend([d['key'], d['content']])
                 contexts = [c for c in contexts if c]
                 res.extend(contexts)
@@ -936,38 +947,55 @@ class Template(ProcessorMixin):
         res_loss_scale: List[float] = []  # result of loss_scale_list
 
         # reset
-        for k in ['video', 'audio', 'object', 'box']:
+        for k in ['video', 'audio', 'object', 'box', 'robot_state']:
             setattr(inputs, f'{k}_idx', 0)
 
         for context, loss_scale in zip(context_list, loss_scale_list):
-            for k in ['video', 'audio']:
-                if context == f'<{k}>' and inputs.is_multimodal and getattr(inputs, f'{k}_idx') < len(
-                        getattr(inputs, f'{k}s')):
-                    c_list = self.replace_tag(k, getattr(inputs, f'{k}_idx'), inputs)
-                    setattr(inputs, f'{k}_idx', getattr(inputs, f'{k}_idx') + 1)
-                    loss_scale = 0.
-                    break
+            if context == self.robot_state_token:
+                if self.robot_state_token_id is None:
+                    raise ValueError(
+                        f'robot state token `{self.robot_state_token}` is not in the tokenizer. '
+                        'Set --robot_state_dim to add it automatically.')
+                if inputs.robot_state_idx >= len(inputs.robot_states):
+                    raise ValueError(
+                        f'num_robot_states: {len(inputs.robot_states)}, num_robot_state_tags: '
+                        f'{inputs.robot_state_idx + 1}')
+                c_list = [self.robot_state_token_id]
+                inputs.robot_state_idx += 1
+                loss_scale = 0.
             else:
-                ref = inputs.objects.get('ref') or []
-                bbox = inputs.objects.get('bbox') or []
-                if context == '<ref-object>' and inputs.ref_idx < len(ref):
-                    idx = inputs.ref_idx
-                    c_list = self.replace_ref(ref[idx], idx, inputs)
-                    inputs.ref_idx += 1
-                elif context == '<bbox>' and inputs.bbox_idx < len(bbox):
-                    idx = inputs.bbox_idx
-                    c_list = self.replace_bbox(bbox[idx], idx, inputs)
-                    inputs.bbox_idx += 1
-                elif context == '<cot-process>' and self.task_type == 'prm':
-                    c_list = self.replace_cot_process(inputs)
+                c_list = None
+            if c_list is None:
+                for k in ['video', 'audio']:
+                    if context == f'<{k}>' and inputs.is_multimodal and getattr(inputs, f'{k}_idx') < len(
+                            getattr(inputs, f'{k}s')):
+                        c_list = self.replace_tag(k, getattr(inputs, f'{k}_idx'), inputs)
+                        setattr(inputs, f'{k}_idx', getattr(inputs, f'{k}_idx') + 1)
+                        loss_scale = 0.
+                        break
                 else:
-                    c_list = [context]
+                    ref = inputs.objects.get('ref') or []
+                    bbox = inputs.objects.get('bbox') or []
+                    if context == '<ref-object>' and inputs.ref_idx < len(ref):
+                        idx = inputs.ref_idx
+                        c_list = self.replace_ref(ref[idx], idx, inputs)
+                        inputs.ref_idx += 1
+                    elif context == '<bbox>' and inputs.bbox_idx < len(bbox):
+                        idx = inputs.bbox_idx
+                        c_list = self.replace_bbox(bbox[idx], idx, inputs)
+                        inputs.bbox_idx += 1
+                    elif context == '<cot-process>' and self.task_type == 'prm':
+                        c_list = self.replace_cot_process(inputs)
+                    else:
+                        c_list = [context]
             res += c_list
             res_loss_scale += [loss_scale] * len(c_list)
+        if inputs.robot_state_idx != len(inputs.robot_states):
+            raise ValueError(
+                f'num_robot_states: {len(inputs.robot_states)}, num_robot_state_tags: {inputs.robot_state_idx}')
         return res, res_loss_scale
 
-    @staticmethod
-    def _add_default_tags(inputs: StdTemplateInputs):
+    def _add_default_tags(self, inputs: StdTemplateInputs):
         total_content = []
         for message in inputs.messages:
             content = message['content'] or ''
@@ -996,6 +1024,17 @@ class Template(ProcessorMixin):
                     logger.warning(
                         f'num_media: {num_media}, num_media_tags: {num_media_tags}, total_content: {total_content}. '
                         'We will only replace the frontmost media_tags while keeping the subsequent media_tags.')
+        if inputs.robot_states:
+            num_state_tags = len(re.findall(re.escape(self.robot_state_token), total_content))
+            num_states = len(inputs.robot_states)
+            num_new_tags = num_states - num_state_tags
+            if num_new_tags > 0:
+                inputs.messages[0]['content'] = self.robot_state_token * num_new_tags + (
+                    inputs.messages[0]['content'] or '')
+            elif num_new_tags < 0:
+                raise ValueError(
+                    f'num_robot_states: {num_states}, num_robot_state_tags: {num_state_tags}, '
+                    f'total_content: {total_content}')
 
     def _encode_context_list(self,
                              context_list: List[Context],
@@ -1284,7 +1323,10 @@ class Template(ProcessorMixin):
 
     def _truncate(self, input_ids: List[int], labels: Optional[List[int]], loss_scale: Optional[List[float]],
                   truncation_strategy: Literal['left', 'right']):
-        placeholder_tokens = torch.tensor(self.placeholder_tokens)
+        placeholder_tokens = list(self.placeholder_tokens)
+        if getattr(self, 'robot_state_token_id', None) is not None:
+            placeholder_tokens.append(self.robot_state_token_id)
+        placeholder_tokens = torch.tensor(placeholder_tokens)
         input_ids_tensor = torch.tensor(input_ids)
         protected = (input_ids_tensor[:, None] == placeholder_tokens).any(dim=-1)
         n_protected = protected.sum().item()
@@ -1318,6 +1360,8 @@ class Template(ProcessorMixin):
     def _encode_truncated(self, inputs: StdTemplateInputs):
         self._preprocess_inputs(inputs)
         if self.mode in {'vllm', 'lmdeploy', 'sglang'}:
+            if inputs.robot_states:
+                raise ValueError('robot_states is only supported by the transformers backend.')
             # For multi-modal models, images do not need to be pre processed here
             # vllm/lmdeploy/sglang will handle the logic
             encoded = Template._encode(self, inputs)
@@ -1415,6 +1459,9 @@ class Template(ProcessorMixin):
             for k in list(encoded.keys()):
                 if k.endswith('labels') or k.endswith('loss_scale'):
                     encoded[k] = None
+        if inputs.robot_states:
+            encoded['robot_states'] = torch.tensor(inputs.robot_states, dtype=torch.float32)
+            encoded['robot_state_count'] = len(inputs.robot_states)
         return encoded
 
     def _get_megatron_cp_length(self, length) -> int:
@@ -1493,6 +1540,12 @@ class Template(ProcessorMixin):
                     'max_length_q', 'max_length_k', 'cu_seq_lens_q', 'cu_seq_lens_k'
             } and k not in kwargs:
                 kwargs[k] = v
+        for key in ['robot_states', 'robot_state_counts']:
+            if key in old_kwargs and key not in kwargs:
+                kwargs[key] = old_kwargs[key]
+        if (kwargs.get('robot_states') is not None and 'inputs_embeds' in kwargs
+                and old_kwargs.get('input_ids') is not None):
+            kwargs['_robot_state_input_ids'] = old_kwargs['input_ids']
         if 'inputs_embeds' in kwargs:
             kwargs.pop('input_ids', None)
 
@@ -1932,6 +1985,11 @@ class Template(ProcessorMixin):
             grid_thw = self.concat_tensor(batch, f'{media_type}_grid_thw', 0)
             if grid_thw is not None:
                 res[f'{media_type}_grid_thw'] = grid_thw
+        robot_states = [b['robot_states'] for b in batch if b.get('robot_states') is not None]
+        if robot_states:
+            res['robot_states'] = torch.concat(robot_states, dim=0)
+            robot_state_counts = [b.get('robot_state_count', 0) for b in batch]
+            res['robot_state_counts'] = torch.tensor(robot_state_counts, dtype=torch.long)
         return res
 
     def _sp_data_collator(self, res, padding_to, tokenizer, padding_side):

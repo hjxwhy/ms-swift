@@ -79,6 +79,9 @@ class ModelArguments:
     attn_impl: Optional[str] = None
     experts_impl: Optional[str] = None
     new_special_tokens: List[str] = field(default_factory=list)
+    robot_state_dim: Optional[int] = None
+    robot_state_projector_hidden_size: Optional[int] = None
+    robot_state_token: str = '<|robot_state|>'
 
     num_labels: Optional[int] = None
     problem_type: Literal['regression', 'single_label_classification', 'multi_label_classification'] = None
@@ -215,6 +218,8 @@ class ModelArguments:
             else:
                 new_special_tokens.append(token)
         self.new_special_tokens = new_special_tokens
+        if self.robot_state_dim is not None and self.robot_state_token not in self.new_special_tokens:
+            self.new_special_tokens.append(self.robot_state_token)
 
     def __post_init__(self):
         if self.model is None:
@@ -240,6 +245,9 @@ class ModelArguments:
             'attn_impl': self.attn_impl,
             'experts_impl': self.experts_impl,
             'new_special_tokens': self.new_special_tokens,
+            'robot_state_dim': self.robot_state_dim,
+            'robot_state_projector_hidden_size': self.robot_state_projector_hidden_size,
+            'robot_state_token': self.robot_state_token,
             'rope_scaling': self.rope_scaling,
             'max_model_len': self.max_model_len,
             'task_type': self.task_type,
