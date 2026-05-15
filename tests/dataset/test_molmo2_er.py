@@ -21,16 +21,16 @@ os.environ['HF_DATASETS_CACHE'] = '/cpfs01/cpfs01/cache/molmo2'
 from swift.dataset import load_dataset
 
 DATASETS = [
-    # ('molmo2-er-clevr', 'images'),
-    # ('molmo2-er-grid3d', 'images'),
-    # ('molmo2-er-refspatial', 'images'),
-    # ('molmo2-er-robopoint', 'images'),
-    # ('molmo2-er-robovqa', 'videos'),
-    # ('molmo2-er-sat', 'images'),
+    ('molmo2-er-clevr', 'images'),
+    ('molmo2-er-grid3d', 'images'),
+    ('molmo2-er-refspatial', 'images'),
+    ('molmo2-er-robopoint', 'images'),
+    ('molmo2-er-robovqa', 'videos'),
+    ('molmo2-er-sat', 'images'),
     ('molmo2-er-sensenova-si', 'images'),
-    # ('molmo2-er-sims-vsi', 'videos'),
-    # ('molmo2-er-vsi-590k', 'videos'),
-    # ('molmo2-er-vstp', 'images'),
+    ('molmo2-er-sims-vsi', 'videos'),
+    ('molmo2-er-vsi-590k', 'videos'),
+    ('molmo2-er-vstp', 'images'),
 ]
 
 def validate_messages(messages):

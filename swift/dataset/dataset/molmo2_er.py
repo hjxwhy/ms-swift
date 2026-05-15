@@ -17,7 +17,7 @@ def _conv_to_messages(conversations):
     role_map = {'human': 'user', 'gpt': 'assistant', 'system': 'system',
                 'user': 'user', 'assistant': 'assistant'}
     return [{'role': role_map[c.get('from') or c['role']],
-             'content': c.get('value') or c['content']}
+             'content': c['value'] if 'value' in c else c['content']}
             for c in conversations]
 
 
@@ -96,6 +96,7 @@ class RoboVQAPreprocessor(RowPreprocessor):
         for m in mgs:
             if isinstance(m['content'], str) and m["role"] == "user":
                 m['content'] = "<video>" + m['content']
+                break
         return {
             'messages': mgs,
             'videos': [f"{BASE}/Molmo2-ER-RoboVQA/{row['videos']}"],
@@ -159,7 +160,6 @@ class SIMSVSILoader(DatasetLoader):
                     ]
                     yield row
 
-        from modelscope.hub.utils.utils import get_cache_dir
         dataset = HfDataset.from_generator(gen, cache_dir=os.path.join(get_cache_dir(), 'datasets'))
         if self.columns:
             dataset = RowPreprocessor.safe_rename_columns(dataset, self.columns)
@@ -169,6 +169,7 @@ class SIMSVSILoader(DatasetLoader):
         if self.remove_unused_columns:
             dataset = RowPreprocessor.remove_useless_columns(dataset)
         return dataset
+
 
 class SIMSVSIPreprocessor(RowPreprocessor):
     def preprocess(self, row):
@@ -199,8 +200,7 @@ class VSTPPreprocessor(RowPreprocessor):
                 m['content'] = m['content'].replace('<|image_pad|>', '<image>')
         return {
             'messages': msgs,
-            'images': [{'bytes': img['bytes'], 'path': img.get('path') or None}
-                       for img in row['images']],
+            'images': [f"{BASE}/Molmo2-ER-VST-P/{img}" for img in row.get('images', [])],
         }
 
 
@@ -261,8 +261,8 @@ register_dataset(DatasetMeta(
     preprocess_func=VSI590KPreprocessor(),
 ))
 
-# register_dataset(DatasetMeta(
-#     dataset_name='molmo2-er-vstp',
-#     dataset_path=f'{BASE}/Molmo2-ER-VST-P/**/*.parquet',
-#     preprocess_func=VSTPPreprocessor(),
-# ))
+register_dataset(DatasetMeta(
+    dataset_name='molmo2-er-vstp',
+    dataset_path=f'{BASE}/Molmo2-ER-VST-P/vst_500k.json',
+    preprocess_func=VSTPPreprocessor(),
+))
