@@ -11,7 +11,9 @@ from torch import nn
 from transformers.integrations import is_deepspeed_zero3_enabled
 from typing import Any, Dict, List, Literal, Optional
 
-from swift.utils import get_env_args, get_packed_seq_params, is_deepspeed_enabled, to_float_dtype
+from swift.utils import get_env_args, get_logger, get_packed_seq_params, is_deepspeed_enabled, to_float_dtype
+
+logger = get_logger()
 from ..base import Template
 from ..constant import LLMTemplateType, MLLMTemplateType
 from ..register import register_template
@@ -297,6 +299,9 @@ class Qwen2VLTemplate(Template):
     image_token_id = 151655
     video_token_id = 151656
     placeholder_tokens = ['<|image_pad|>', '<|video_pad|>']
+    # Protect vision boundary markers from truncation; without them get_rope_index loses per-image
+    # group boundaries and crashes (or, on v2/v2.5, silently mis-assigns positions).
+    extra_truncate_protected_tokens = ['<|vision_start|>', '<|vision_end|>']
     version = 'v2'
     use_model = True
     support_padding_free = True
@@ -431,12 +436,69 @@ class Qwen2VLTemplate(Template):
             res['second_per_grid_ts'] = second_per_grid_ts
         return res
 
+    def _visual_tokens_intact(self, r: Dict[str, Any]) -> bool:
+        """Return False if visual tokens in input_ids were truncated relative to grid_thw metadata."""
+        image_grid_thw = r.get('image_grid_thw')
+        video_grid_thw = r.get('video_grid_thw')
+        has_image = image_grid_thw is not None and len(image_grid_thw) > 0
+        has_video = video_grid_thw is not None and len(video_grid_thw) > 0
+        if not has_image and not has_video:
+            return True  # text-only row, always valid
+        if not hasattr(self, '_spatial_merge_size'):
+            base_model = self.get_base_model(self._get_model())
+            self._spatial_merge_size = base_model.config.vision_config.spatial_merge_size
+        merge = self._spatial_merge_size
+
+        def expected(grid_thw):
+            if grid_thw is None or len(grid_thw) == 0:
+                return 0
+            return sum(int(thw[0]) * (int(thw[1]) // merge) * (int(thw[2]) // merge) for thw in grid_thw)
+
+        input_ids = r['input_ids']
+        actual_image = sum(1 for tid in input_ids if tid == self.image_token_id)
+        actual_video = sum(1 for tid in input_ids if tid == self.video_token_id)
+        if actual_image != expected(image_grid_thw) or actual_video != expected(video_grid_thw):
+            return False
+
+        # Also verify boundary structure: each image/video must form its own contiguous run, separated
+        # by non-media tokens (vision_start/vision_end/text). The v3 get_rope_index splits modality
+        # groups via itertools.groupby on mm_token_type_ids; if separator tokens were truncated, all
+        # image-pad tokens collapse into one group and only the first grid_thw entry is consumed,
+        # producing a (3, n_first_image) tensor that fails to assign into the (3, seq_len) slot.
+        def _count_segments(ids, token_id):
+            n, in_seg = 0, False
+            for tid in ids:
+                if tid == token_id:
+                    if not in_seg:
+                        n += 1
+                        in_seg = True
+                else:
+                    in_seg = False
+            return n
+
+        n_img_segments = _count_segments(input_ids, self.image_token_id) if has_image else 0
+        n_vid_segments = _count_segments(input_ids, self.video_token_id) if has_video else 0
+        if n_img_segments != (len(image_grid_thw) if has_image else 0):
+            return False
+        if n_vid_segments != (len(video_grid_thw) if has_video else 0):
+            return False
+        return True
+
     def packing_row(self, row: List[Dict[str, Any]]) -> Dict[str, Any]:
-        for r in row:
+        valid_row = [r for r in row if self._visual_tokens_intact(r)]
+        n_dropped = len(row) - len(valid_row)
+        # if n_dropped > 0:
+        #     logger.warning(f'packing_row: dropped {n_dropped}/{len(row)} row(s) with truncated visual tokens. '
+        #                    f'This usually means a stale dataset cache built before the truncation fix; '
+        #                    f'rebuild the --to_cached_dataset output, or raise --max_length above the '
+        #                    f'worst-case media budget (sum(grid_thw // merge^2) + 2 per image).')
+        if not valid_row:
+            valid_row = row  # fallback: skip position_ids; super() will use sequential ids
+        for r in valid_row:
             r_copy = r.copy()
             r_copy['input_ids'] = torch.tensor(r_copy['input_ids'])[None]
             r.update(self._get_position_ids(r_copy))
-        packed = super().packing_row(row)
+        packed = super().packing_row(valid_row)
         return packed
 
     def _get_position_ids(self, inputs: Dict[str, Any]):
@@ -458,13 +520,78 @@ class Qwen2VLTemplate(Template):
         elif not self.is_training:
             # Compatible with older versions of transformers
             return {}
-        position_ids, _ = get_rope_index(
-            input_ids,
-            image_grid_thw=inputs.get('image_grid_thw'),
-            video_grid_thw=inputs.get('video_grid_thw'),
-            attention_mask=attention_mask,
-            **kwargs)
+        try:
+            position_ids, _ = get_rope_index(
+                input_ids,
+                image_grid_thw=inputs.get('image_grid_thw'),
+                video_grid_thw=inputs.get('video_grid_thw'),
+                attention_mask=attention_mask,
+                **kwargs)
+        except RuntimeError as e:
+            self._dump_rope_failure(inputs, kwargs, attention_mask, e)
+            raise
         return {'position_ids': self._concat_text_position_ids(position_ids)}
+
+    def _dump_rope_failure(self, inputs, kwargs, attention_mask, exc):
+        """Dump inputs that caused get_rope_index to fail, for offline debugging."""
+        import os
+        import pickle
+        import time
+        try:
+            rank = int(os.environ.get('RANK', '0'))
+            dump_dir = os.environ.get('SWIFT_ROPE_DUMP_DIR', '/tmp/swift_rope_dump')
+            os.makedirs(dump_dir, exist_ok=True)
+            ts = int(time.time() * 1000)
+            path = os.path.join(dump_dir, f'rope_fail_rank{rank}_{ts}_{os.getpid()}.pkl')
+
+            input_ids = inputs.get('input_ids')
+            image_grid_thw = inputs.get('image_grid_thw')
+            video_grid_thw = inputs.get('video_grid_thw')
+
+            def _to_cpu(x):
+                if isinstance(x, torch.Tensor):
+                    return x.detach().cpu()
+                return x
+
+            payload = {
+                'error': repr(exc),
+                'version': self.version,
+                'image_token_id': self.image_token_id,
+                'video_token_id': self.video_token_id,
+                'spatial_merge_size': getattr(self, '_spatial_merge_size', None),
+                'input_ids': _to_cpu(input_ids),
+                'attention_mask': _to_cpu(attention_mask),
+                'image_grid_thw': _to_cpu(image_grid_thw),
+                'video_grid_thw': _to_cpu(video_grid_thw),
+                'kwargs': {k: _to_cpu(v) for k, v in kwargs.items()},
+            }
+
+            # Quick token tallies to make root-causing fast
+            try:
+                ids_flat = input_ids.flatten().tolist() if isinstance(input_ids, torch.Tensor) else list(input_ids)
+                payload['n_image_tokens'] = sum(1 for t in ids_flat if t == self.image_token_id)
+                payload['n_video_tokens'] = sum(1 for t in ids_flat if t == self.video_token_id)
+                payload['seq_len'] = len(ids_flat)
+                merge = getattr(self, '_spatial_merge_size', None)
+                if merge is not None:
+                    def _expected(grid_thw):
+                        if grid_thw is None or len(grid_thw) == 0:
+                            return 0
+                        return sum(int(thw[0]) * (int(thw[1]) // merge) * (int(thw[2]) // merge) for thw in grid_thw)
+                    payload['expected_image_tokens'] = _expected(image_grid_thw)
+                    payload['expected_video_tokens'] = _expected(video_grid_thw)
+            except Exception as tally_exc:
+                payload['tally_error'] = repr(tally_exc)
+
+            with open(path, 'wb') as f:
+                pickle.dump(payload, f)
+            logger.error(f'[rope-debug] dumped failing inputs to {path}: '
+                         f"seq_len={payload.get('seq_len')} "
+                         f"img_tok={payload.get('n_image_tokens')}/exp={payload.get('expected_image_tokens')} "
+                         f"vid_tok={payload.get('n_video_tokens')}/exp={payload.get('expected_video_tokens')} "
+                         f"img_grid={image_grid_thw} vid_grid={video_grid_thw}")
+        except Exception as dump_exc:
+            logger.error(f'[rope-debug] failed to dump inputs: {dump_exc!r}')
 
     def _data_collator(self, batch: List[Dict[str, Any]], *, padding_to: Optional[int] = None) -> Dict[str, Any]:
         res = super()._data_collator(batch, padding_to=padding_to)

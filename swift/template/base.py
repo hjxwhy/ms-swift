@@ -64,6 +64,9 @@ class Template(ProcessorMixin):
     robot_state_token = '<|robot_state|>'
     cot_process_placeholder = ['ки']
     placeholder_tokens = []  # For clearer printing
+    # Extra token strings/ids that must survive `_truncate` alongside placeholder_tokens
+    # (e.g. structural boundary tokens like <|vision_start|>/<|vision_end|>). Resolved to ids in __init__.
+    extra_truncate_protected_tokens = []
     load_images = True
     skip_prompt = True
     use_model = False
@@ -218,6 +221,18 @@ class Template(ProcessorMixin):
         for i, token in enumerate(self.placeholder_tokens):
             if isinstance(token, str):
                 self.placeholder_tokens[i] = tokenizer.convert_tokens_to_ids(token)
+        # Resolve extra truncate-protected tokens to ids (instance-scoped copy, drop unresolved).
+        unk_id = getattr(tokenizer, 'unk_token_id', None)
+        resolved_extra = []
+        for token in list(self.extra_truncate_protected_tokens):
+            if isinstance(token, str):
+                tid = tokenizer.convert_tokens_to_ids(token)
+                if tid is None or tid == unk_id:
+                    continue
+                resolved_extra.append(tid)
+            elif token is not None:
+                resolved_extra.append(token)
+        self.extra_truncate_protected_tokens = resolved_extra
         self.robot_state_token_id = tokenizer.convert_tokens_to_ids(self.robot_state_token)
         if (self.robot_state_token_id == getattr(tokenizer, 'unk_token_id', None)
                 and self.robot_state_token not in getattr(tokenizer, 'get_vocab', lambda: {})()):
@@ -1326,10 +1341,23 @@ class Template(ProcessorMixin):
         placeholder_tokens = list(self.placeholder_tokens)
         if getattr(self, 'robot_state_token_id', None) is not None:
             placeholder_tokens.append(self.robot_state_token_id)
+        # Also protect structural tokens (e.g. <|vision_start|>/<|vision_end|>) so per-image
+        # boundaries survive truncation; without them the new v3 get_rope_index collapses all
+        # image-pad tokens into one group via itertools.groupby and produces mismatched position_ids.
+        if self.extra_truncate_protected_tokens:
+            placeholder_tokens.extend(self.extra_truncate_protected_tokens)
         placeholder_tokens = torch.tensor(placeholder_tokens)
         input_ids_tensor = torch.tensor(input_ids)
         protected = (input_ids_tensor[:, None] == placeholder_tokens).any(dim=-1)
         n_protected = protected.sum().item()
+        # If protected tokens alone meet/exceed max_length there is no room for ANY non-protected
+        # token; the resulting sequence would be all-placeholder with no system/user/assistant
+        # context and downstream rope/position logic would fail. Drop the sample via MaxLengthError
+        # — the dataset preprocessor / packing layers already handle this exception by skipping.
+        if n_protected >= self.max_length:
+            raise MaxLengthError(
+                f'Protected token count ({n_protected}) >= max_length ({self.max_length}); '
+                f'media content alone exceeds the budget and the row would be unusable. Dropped.')
         if n_protected < self.max_length:
             non_protected = (~protected).nonzero(as_tuple=True)[0]
             if truncation_strategy == 'left':
