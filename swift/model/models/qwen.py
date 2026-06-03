@@ -668,21 +668,24 @@ register_model(
     ))
 
 
+def _should_use_load_file(video) -> bool:
+    if not isinstance(video, str):
+        return False
+    video = video.strip()
+    return video.startswith('http') or video.startswith('data:') or len(video) > 2000
+
+
 def _get_new_read_video_func(read_video_func, read_backend):
-    if read_backend == 'torchvision':
 
-        def _new_read_video(ele: dict):
-            try:
-                return read_video_func(ele)
-            except Exception:
-                from swift.template import load_file  # base64
-                ele['video'] = load_file(ele['video'])
-                return read_video_func(ele)
-    else:
-
-        def _new_read_video(ele: dict):
+    def _new_read_video(ele: dict):
+        try:
+            return read_video_func(ele)
+        except Exception:
+            video = ele['video']
+            if not _should_use_load_file(video):
+                raise
             from swift.template import load_file
-            ele['video'] = load_file(ele['video'])
+            ele['video'] = load_file(video)
             return read_video_func(ele)
 
     return _new_read_video
@@ -1100,6 +1103,7 @@ register_model(
     ModelMeta(
         MLLMModelType.qwen3_vl, [
             ModelGroup([
+                Model('Qwen/Qwen3-VL-4B-Base', 'Qwen/Qwen3-VL-4B-Base'),
                 Model('Qwen/Qwen3-VL-2B-Instruct', 'Qwen/Qwen3-VL-2B-Instruct'),
                 Model('Qwen/Qwen3-VL-2B-Thinking', 'Qwen/Qwen3-VL-2B-Thinking'),
                 Model('Qwen/Qwen3-VL-2B-Instruct-FP8', 'Qwen/Qwen3-VL-2B-Instruct-FP8'),
