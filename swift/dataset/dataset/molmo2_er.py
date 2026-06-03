@@ -10,7 +10,7 @@ from swift.dataset.loader import DatasetLoader
 from swift.dataset.preprocessor import RowPreprocessor
 from swift.dataset.register import register_dataset
 
-BASE = '/cpfs01/cpfs01/datas/molmo2_er_datasets'
+BASE = 'molmo2_er_datasets'
 
 
 def _conv_to_messages(conversations):
@@ -25,7 +25,7 @@ class CLEVRPreprocessor(RowPreprocessor):
     def preprocess(self, row):
         img = f"{BASE}/Molmo2-ER-CLEVR/CLEVR_v1.0/images/train/{row['image_filename']}"
         return {
-            'messages': [{'role': 'user', 'content': row['question']},
+            'messages': [{'role': 'user', 'content': '<image>' + row['question']},
                          {'role': 'assistant', 'content': str(row['answer'])}],
             'images': [img],
         }
@@ -52,9 +52,10 @@ class CLEVRLoader(DatasetLoader):
 class GRiD3DPreprocessor(RowPreprocessor):
     def prepare_dataset(self, dataset):
         self.img_paths = {}
-        for f in glob.glob(f'{BASE}/Molmo2-ER-GRiD-3D/grid-3d/part_*/*.png'):
+        prefix = f'{ROOT_IMAGE_DIR}/'
+        for f in glob.glob(f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-GRiD-3D/grid-3d/part_*/*.png'):
             idx = int(os.path.splitext(os.path.basename(f))[0])
-            self.img_paths[idx] = f
+            self.img_paths[idx] = f[len(prefix):] if f.startswith(prefix) else f
         return super().prepare_dataset(dataset)
 
     def preprocess(self, row):
@@ -158,6 +159,7 @@ class SIMSVSILoader(DatasetLoader):
                         {'from': c['from'], 'value': c['value']}
                         for c in row['conversations']
                     ]
+                    row['images'] = row.get('images') or []
                     yield row
 
         dataset = HfDataset.from_generator(gen, cache_dir=os.path.join(get_cache_dir(), 'datasets'))
@@ -173,22 +175,56 @@ class SIMSVSILoader(DatasetLoader):
 
 class SIMSVSIPreprocessor(RowPreprocessor):
     def preprocess(self, row):
-        return {
-            'messages': _conv_to_messages(row['conversations']),
-            'videos': [f"{BASE}/Molmo2-ER-SIMS-VSI/{row['videos']}"],
-        }
-
-
-class VSI590KPreprocessor(RowPreprocessor):
-    def preprocess(self, row):
         msgs = _conv_to_messages(row['conversations'])
-        # Replace <image> with <video>
         for m in msgs:
             if isinstance(m['content'], str):
                 m['content'] = m['content'].replace('<image>', '<video>')
         return {
             'messages': msgs,
-            'videos': [f"{BASE}/Molmo2-ER-VSI-590K/{v}" for v in row.get('videos', [])],
+            'videos': [f"{BASE}/Molmo2-ER-SIMS-VSI/{row['videos']}"],
+        }
+
+
+class VSI590KLoader(DatasetLoader):
+    def _load_dataset_path(self, dataset_path, dataset_meta):
+        import json
+        from datasets import Dataset as HfDataset, Features, Sequence, Value
+
+        features = Features({
+            'conversations': [{'from': Value('string'), 'value': Value('string')}],
+            'images': Sequence(Value('string')),
+            'videos': Sequence(Value('string')),
+            'question_type': Value('string'),
+        })
+
+        def gen():
+            with open(dataset_path) as f:
+                for line in f:
+                    row = json.loads(line)
+                    row.setdefault('images', [])
+                    row.setdefault('videos', [])
+                    row.setdefault('question_type', '')
+                    yield row
+
+        dataset = HfDataset.from_generator(gen, features=features,
+                                           cache_dir=os.path.join(get_cache_dir(), 'datasets'))
+        if self.columns:
+            dataset = RowPreprocessor.safe_rename_columns(dataset, self.columns)
+        dataset = dataset_meta.preprocess_func(
+            dataset, num_proc=self.num_proc, load_from_cache_file=self.load_from_cache_file,
+            strict=self.strict, enable_auto_mapping=not self.disable_auto_column_mapping)
+        if self.remove_unused_columns:
+            dataset = RowPreprocessor.remove_useless_columns(dataset)
+        return dataset
+
+
+class VSI590KPreprocessor(RowPreprocessor):
+    def preprocess(self, row):
+        msgs = _conv_to_messages(row['conversations'])
+        return {
+            'messages': msgs,
+            'images': [f"{BASE}/Molmo2-ER-VSI-590K/{img}" for img in row.get('images', [])],
+            'videos': [f"{BASE}/Molmo2-ER-VSI-590K/{vid}" for vid in row.get('videos', [])],
         }
 
 
@@ -203,66 +239,67 @@ class VSTPPreprocessor(RowPreprocessor):
             'images': [f"{BASE}/Molmo2-ER-VST-P/{img}" for img in row.get('images', [])],
         }
 
-
+ROOT_IMAGE_DIR = os.environ.get('ROOT_IMAGE_DIR')
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-clevr',
-    dataset_path=f'{BASE}/Molmo2-ER-CLEVR/CLEVR_v1.0/questions/CLEVR_train_questions.json',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-CLEVR/CLEVR_v1.0/questions/CLEVR_train_questions.json',
     preprocess_func=CLEVRPreprocessor(),
     loader=CLEVRLoader,
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-grid3d',
-    dataset_path=f'{BASE}/Molmo2-ER-GRiD-3D/grid-3d/questions.json',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-GRiD-3D/grid-3d/questions.json',
     preprocess_func=GRiD3DPreprocessor(),
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-refspatial',
-    dataset_path=f'{BASE}/Molmo2-ER-RefSpatial/refspatial_merged.jsonl',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-RefSpatial/refspatial_merged.jsonl',
     preprocess_func=RefSpatialPreprocessor(),
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-robopoint',
-    dataset_path=f'{BASE}/Molmo2-ER-RoboPoint/robopoint_1432k_qwen.jsonl',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-RoboPoint/robopoint_1432k_qwen.jsonl',
     preprocess_func=RoboPointPreprocessor(),
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-robovqa',
-    dataset_path=f'{BASE}/Molmo2-ER-RoboVQA/robovqa_*.json',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-RoboVQA/robovqa_*.json',
     preprocess_func=RoboVQAPreprocessor(),
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-sat',
-    dataset_path=f'{BASE}/Molmo2-ER-SAT/exported/SAT_train.jsonl',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-SAT/exported/SAT_train.jsonl',
     preprocess_func=SATPreprocessor(),
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-sensenova-si',
-    dataset_path=f'{BASE}/Molmo2-ER-SenseNova-SI/SenseNova-SI-800K.jsonl',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-SenseNova-SI/SenseNova-SI-800K.jsonl',
     preprocess_func=SenseNovaPreprocessor(),
     loader=SenseNovaLoader,
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-sims-vsi',
-    dataset_path=f'{BASE}/Molmo2-ER-SIMS-VSI/sims_vsi_200k.parquet',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-SIMS-VSI/sims_vsi_200k.parquet',
     preprocess_func=SIMSVSIPreprocessor(),
     loader=SIMSVSILoader,
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-vsi-590k',
-    dataset_path=f'{BASE}/Molmo2-ER-VSI-590K/vsi_590k_clean.jsonl',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-VSI-590K/vsi_590k_clean.jsonl',
     preprocess_func=VSI590KPreprocessor(),
+    loader=VSI590KLoader,
 ))
 
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-vstp',
-    dataset_path=f'{BASE}/Molmo2-ER-VST-P/vst_500k.json',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-VST-P/vst_500k.json',
     preprocess_func=VSTPPreprocessor(),
 ))

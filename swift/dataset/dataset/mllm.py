@@ -1344,3 +1344,11 @@ register_dataset(
         ],
         preprocess_func=Geometry3KPreprocessor(),
         tags=['multi-modal', 'en', 'math']))
+
+register_dataset(
+    DatasetMeta(
+        ms_dataset_id='vlm_mix_robot_openx',
+        hf_dataset_id='vlm_mix_robot_openx',
+        dataset_path='/cpfs01/cpfs01/datas/vlm_dataset/merged_datasets/qwen3vl',
+        preprocess_func=MessagesPreprocessor(),
+        split=['train']))
