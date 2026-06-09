@@ -239,6 +239,69 @@ class VSTPPreprocessor(RowPreprocessor):
             'images': [f"{BASE}/Molmo2-ER-VST-P/{img}" for img in row.get('images', [])],
         }
 
+
+class SATv2Preprocessor(RowPreprocessor):
+    """SAT-v2: abs image paths already set; inject <image> tags into user content."""
+    def preprocess(self, row):
+        msgs = list(row['messages'])
+        imgs = row.get('images', [])
+        if imgs and msgs:
+            msgs[0] = dict(msgs[0])
+            msgs[0]['content'] = '<image>' * len(imgs) + msgs[0]['content']
+        return {'messages': msgs, 'images': imgs}
+
+
+class EgoPlanPreprocessor(RowPreprocessor):
+    """EgoPlan: one multi-timestamp video-frame ref -> N single-frame refs + N <image> tags."""
+    def preprocess(self, row):
+        msgs = list(row['messages'])
+        ref = row['images'][0]
+        rel, ts_str = ref.rsplit(':', 1)
+        timestamps = ts_str.split(',')
+        full = f'{BASE}/EgoPlan/{rel}'
+        images = [f'{full}:{t}' for t in timestamps]
+        if msgs:
+            msgs[0] = dict(msgs[0])
+            msgs[0]['content'] = '<image>' * len(images) + msgs[0]['content']
+        return {'messages': msgs, 'images': images}
+
+
+class MixERAllLoader(DatasetLoader):
+    """Load all *.jsonl files under Mix-ER-All."""
+    def _load_dataset_path(self, dataset_path, dataset_meta):
+        import json
+        from datasets import Dataset as HfDataset
+
+        def gen():
+            for jsonl_file in sorted(glob.glob(dataset_path)):
+                with open(jsonl_file) as f:
+                    for line in f:
+                        yield json.loads(line)
+
+        dataset = HfDataset.from_generator(gen, cache_dir=os.path.join(get_cache_dir(), 'datasets'))
+        if self.columns:
+            dataset = RowPreprocessor.safe_rename_columns(dataset, self.columns)
+        dataset = dataset_meta.preprocess_func(
+            dataset, num_proc=self.num_proc, load_from_cache_file=self.load_from_cache_file,
+            strict=self.strict, enable_auto_mapping=not self.disable_auto_column_mapping)
+        if self.remove_unused_columns:
+            dataset = RowPreprocessor.remove_useless_columns(dataset)
+        return dataset
+
+
+class MixERAllPreprocessor(RowPreprocessor):
+    """Mix-ER-All: messages/images with abs paths; inject <image> tags if missing."""
+    def preprocess(self, row):
+        msgs = list(row['messages'])
+        imgs = row.get('images', [])
+        if imgs and msgs:
+            first_content = msgs[0].get('content', '')
+            if '<image>' not in first_content:
+                msgs[0] = dict(msgs[0])
+                msgs[0]['content'] = '<image>' * len(imgs) + first_content
+        return {'messages': msgs, 'images': imgs}
+
+
 ROOT_IMAGE_DIR = os.environ.get('ROOT_IMAGE_DIR')
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-clevr',
@@ -302,4 +365,29 @@ register_dataset(DatasetMeta(
     dataset_name='molmo2-er-vstp',
     dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-VST-P/vst_500k.json',
     preprocess_func=VSTPPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='molmo2-er-sat-v2',
+    dataset_path='/cpfs01/cpfs01/datas/vlm_dataset/molmo2_er_datasets/SAT-v2/train.jsonl',
+    preprocess_func=SATv2Preprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='molmo2-er-egoplan',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/EgoPlan/EgoPlan_IT_messages.jsonl',
+    preprocess_func=EgoPlanPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='molmo2-er-egoplan-mc',
+    dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/EgoPlan/EgoPlan_mc_messages.jsonl',
+    preprocess_func=EgoPlanPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='molmo2-er-mix-er-all',
+    dataset_path='/cpfs01/cpfs01/datas/vlm_dataset/molmo2_er_datasets/Mix-ER-All/*.jsonl',
+    preprocess_func=MixERAllPreprocessor(),
+    loader=MixERAllLoader,
 ))
