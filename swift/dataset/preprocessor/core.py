@@ -5,7 +5,7 @@ import os
 from collections import Counter
 from contextlib import contextmanager
 from datasets import Dataset as HfDataset
-from datasets import Image
+from datasets import Features, Image
 from datasets import IterableDataset as HfIterableDataset
 from datasets import Sequence, Value
 from itertools import chain
@@ -66,17 +66,25 @@ class RowPreprocessor:
             return
         messages = row['messages']
         assert len(messages) > 0, f'messages: {messages}'
-        # fix swift/SlimOrca (concat)
-        for message in messages:
-            keys = set(message.keys()) - {'role', 'content', 'loss', 'loss_scale'}
-            for key in keys:
-                message.pop(key)
-
-        for message in messages:
+        # Normalize every message to the canonical schema `{role, content, loss, loss_scale}`
+        # in a fixed key order. Explicitly materializing `loss`/`loss_scale` (default None)
+        # keeps the exported/cached arrow schema consistent regardless of the `datasets`
+        # version: `_patch_arrow_writer` can no longer force the schema on datasets>=4
+        # (its `update_features=True` path keeps the inferred type when it differs), so the
+        # keys must be present in the data itself, otherwise caches built here fail to
+        # concatenate with caches that carry these keys. Also drops unknown keys
+        # (fix swift/SlimOrca concat).
+        for i, message in enumerate(messages):
             role, content = message['role'], message['content']
             # The terms 'tool' and 'tool_response' have the same meaning, ensuring compatibility.
             assert role in {'system', 'user', 'tool_call', 'tool_response', 'tool', 'assistant'}, f'message: {message}'
             assert content is not None, f'message: {message}'
+            messages[i] = {
+                'role': role,
+                'content': content,
+                'loss': message.get('loss'),
+                'loss_scale': message.get('loss_scale'),
+            }
 
     @staticmethod
     def _cast_mm_data(row: Dict[str, Any]) -> None:
@@ -288,37 +296,74 @@ class RowPreprocessor:
         return dataset
 
     @staticmethod
+    def _cached_features_overrides() -> Dict[str, Any]:
+        # Canonical arrow feature types for the columns ms-swift cares about. These are
+        # forced so that exported/cached datasets share one schema and can be concatenated,
+        # regardless of which rows happen to carry optional keys (e.g. `loss`/`loss_scale`
+        # are usually all-None and would otherwise be inferred as `null`).
+        messages_feature = [{
+            'role': Value(dtype='string'),
+            'content': Value(dtype='string'),
+        }]
+        messages_feature_with_loss = [{
+            'role': Value(dtype='string'),
+            'content': Value(dtype='string'),
+            'loss': Value(dtype='bool'),
+            'loss_scale': Value(dtype='float64'),
+        }]
+        return {
+            'messages': messages_feature_with_loss,
+            'rejected_messages': messages_feature_with_loss,
+            'positive_messages': [messages_feature],
+            'negative_messages': [messages_feature],
+            'images': [{
+                'bytes': Value(dtype='binary'),
+                'path': Value(dtype='string')
+            }],
+            'robot_states': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),
+            'objects': {
+                'ref': Sequence(feature=Value(dtype='string'), length=-1),
+                'bbox': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),
+                'bbox_type': Value(dtype='string'),
+                'image_id': Sequence(feature=Value(dtype='int64'), length=-1),
+            },
+        }
+
+    @staticmethod
+    def _cast_cached_features(dataset: DATASET_TYPE) -> DATASET_TYPE:
+        # Enforce the canonical schema after preprocessing. `_patch_arrow_writer` only
+        # forces types on `datasets<4`; on `datasets>=4` the writer keeps the inferred
+        # type whenever it differs from the forced one (its `update_features` path now
+        # requires an exact match), so all-None `loss`/`loss_scale` columns get written as
+        # `null` and break concatenation with caches that use `bool`/`float64`. Casting
+        # here makes the result version-independent. It is cheap: the affected columns are
+        # short text / all-null (image `bytes` are path-only), so no buffers are rewritten.
+        if not isinstance(dataset, HfDataset):
+            return dataset
+        features = dataset.features
+        overrides = RowPreprocessor._cached_features_overrides()
+        new_features = dict(features)
+        changed = False
+        for key, feature in overrides.items():
+            if key in features and features[key] != feature:
+                new_features[key] = feature
+                changed = True
+        if changed:
+            dataset = dataset.cast(Features(new_features))
+        return dataset
+
+    @staticmethod
     @contextmanager
     def _patch_arrow_writer():
         # fix AI-ModelScope/ms_agent_for_agentfabric:all
         from datasets.arrow_writer import ArrowWriter
 
+        overrides = RowPreprocessor._cached_features_overrides()
+
         def _new_init(self, schema=None, features=None, *args, **kwargs):
 
             if features is not None:
-                messages_feature = [{
-                    'role': Value(dtype='string'),
-                    'content': Value(dtype='string'),
-                }]
-                messages_feature_with_loss = [{
-                    'role': Value(dtype='string'),
-                    'content': Value(dtype='string'),
-                    'loss': Value(dtype='bool'),
-                    'loss_scale': Value(dtype='float64'),
-                }]
-                features['messages'] = messages_feature_with_loss
-                features['rejected_messages'] = messages_feature_with_loss
-                features['positive_messages'] = [messages_feature]
-                features['negative_messages'] = [messages_feature]
-                features['images'] = [{'bytes': Value(dtype='binary'), 'path': Value(dtype='string')}]
-                features['robot_states'] = Sequence(
-                    feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1)
-                features['objects'] = {
-                    'ref': Sequence(feature=Value(dtype='string'), length=-1),
-                    'bbox': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),
-                    'bbox_type': Value(dtype='string'),
-                    'image_id': Sequence(feature=Value(dtype='int64'), length=-1),
-                }
+                features.update(overrides)
             ArrowWriter.__origin_init__(self, schema, features, *args, **kwargs)
 
         ArrowWriter.__origin_init__ = ArrowWriter.__init__
@@ -400,6 +445,7 @@ class RowPreprocessor:
             logger.info(
                 f'Dataset filtered, origin length: {len(dataset)}, filtered dataset length: {len(dataset_mapped)}')
 
+        dataset_mapped = self._cast_cached_features(dataset_mapped)
         return dataset_mapped
 
 

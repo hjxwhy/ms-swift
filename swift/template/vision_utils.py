@@ -161,7 +161,26 @@ def load_file(path: Union[str, bytes, _T]) -> Union[BytesIO, _T]:
     return res
 
 
+# Matches a lazy video-frame reference like ``path/to/file.mp4:1.880000`` (single timestamp).
+_VIDEO_FRAME_RE = re.compile(r'^(?P<path>.+\.(?:mp4|mkv|avi|webm|mov)):(?P<ts>\d+(?:\.\d+)?)$', re.IGNORECASE)
+
+
+def _load_video_frame(path: str, timestamp: float) -> Image.Image:
+    """Decode a single frame at ``timestamp`` (seconds) from a video file into a PIL image."""
+    from lerobot.datasets.video_utils import decode_video_frames
+    tolerance_s = get_env_args('video_frame_tolerance_s', float, 1.0)
+    backend = get_env_args('video_load_backend', str, None)
+    frame = decode_video_frames(path, [timestamp], tolerance_s, backend=backend)[0]
+    array = (frame * 255).round().to(torch.uint8).permute(1, 2, 0).numpy()
+    return Image.fromarray(array).convert('RGB')
+
+
 def load_image(image: Union[str, bytes, Image.Image]) -> Image.Image:
+    if isinstance(image, str):
+        match_ = _VIDEO_FRAME_RE.match(image.strip())
+        if match_ is not None:
+            path = _check_path(match_.group('path')) or match_.group('path')
+            return _load_video_frame(path, float(match_.group('ts')))
     image = load_file(image)
     if isinstance(image, BytesIO):
         image = Image.open(image)
