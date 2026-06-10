@@ -1,9 +1,12 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import base64
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from PIL import Image
 from typing import Any, Dict, List, Optional, Union
+
+import numpy as np
 
 from swift.utils import get_logger
 from .utils import Messages, Tool, get_last_user_round, messages_to_history
@@ -65,6 +68,15 @@ class StdTemplateInputs:
         for key in ['label', 'channel', 'margin', 'rejected_response', 'robot_states']:
             if key in inputs:
                 kwargs[key] = inputs[key]
+        # Compact robot-state payload: a base64 float16 state vector plus an int bit-mask of
+        # valid dims. Decoded lazily here (kept raw in the cache to save space) and fed into the
+        # existing robot_states projector path as a single `state ‖ mask` vector.
+        state_b64 = inputs.get('state_b64_f16')
+        if state_b64 and 'robot_states' not in kwargs:
+            state = np.frombuffer(base64.b64decode(state_b64), dtype=np.float16).astype(np.float32)
+            mask_bits = int(inputs.get('state_mask_bits') or 0)
+            mask = np.array([(mask_bits >> i) & 1 for i in range(len(state))], dtype=np.float32)
+            kwargs['robot_states'] = [np.concatenate([state, mask]).tolist()]
         messages = inputs['messages']
         tools = inputs.get('tools')
         objects = inputs.get('objects') or {}

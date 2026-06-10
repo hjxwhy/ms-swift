@@ -31,6 +31,10 @@ class RowPreprocessor:
                                 'channel',
                                 'margin',
                                 'teacher_prompt',
+                                # Compact robot-state payload (decoded lazily at encode time);
+                                # kept raw in the cache to save space.
+                                'state_b64_f16',
+                                'state_mask_bits',
                             ]
 
     def __init__(self,
@@ -321,6 +325,8 @@ class RowPreprocessor:
                 'path': Value(dtype='string')
             }],
             'robot_states': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),
+            'state_b64_f16': Value(dtype='string'),
+            'state_mask_bits': Value(dtype='int64'),
             'objects': {
                 'ref': Sequence(feature=Value(dtype='string'), length=-1),
                 'bbox': Sequence(feature=Sequence(feature=Value(dtype='float64'), length=-1), length=-1),
