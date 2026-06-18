@@ -70,9 +70,13 @@ class StdTemplateInputs:
                 kwargs[key] = inputs[key]
         # Compact robot-state payload: a base64 float16 state vector plus an int bit-mask of
         # valid dims. Decoded lazily here (kept raw in the cache to save space) and fed into the
-        # existing robot_states projector path as a single `state ‖ mask` vector.
+        # existing robot_states projector path as a single `state ‖ mask` vector. Only emit it when
+        # the prompt actually references the state token: some subsets (e.g. it2vm) carry the state
+        # payload but no <|robot_state|> token, and an unmatched robot_states vector would break the
+        # 1:1 token<->state correspondence the model relies on (especially under packing).
         state_b64 = inputs.get('state_b64_f16')
-        if state_b64 and 'robot_states' not in kwargs:
+        if state_b64 and 'robot_states' not in kwargs and any(
+                '<|robot_state|>' in str(m.get('content') or '') for m in inputs['messages']):
             state = np.frombuffer(base64.b64decode(state_b64), dtype=np.float16).astype(np.float32)
             mask_bits = int(inputs.get('state_mask_bits') or 0)
             mask = np.array([(mask_bits >> i) & 1 for i in range(len(state))], dtype=np.float32)

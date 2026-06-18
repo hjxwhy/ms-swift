@@ -1029,8 +1029,13 @@ def _compat_qwen3_vl_mixed_data(model, processor, is_moe: bool = False):
                 **kwargs,
             )
 
-        if (input_ids is None) ^ (inputs_embeds is not None):
-            raise ValueError('You must specify exactly one of input_ids or inputs_embeds')
+        # This patched forward threads input_ids through for the visual masks and get_rope_index
+        # even when inputs_embeds is precomputed upstream (e.g. the robot_state projector scatters
+        # state embeds into inputs_embeds while keeping input_ids so images can still be merged), so
+        # both may legitimately be set here. The language_model below is always called with
+        # input_ids=None, inputs_embeds=..., so only "neither provided" is invalid.
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError('You must specify input_ids or inputs_embeds')
 
         inputs_embeds, visual_pos_masks, deepstack_visual_embeds = _forward_qwen3_vl_or_qwen3_omni(
             self, processor, input_ids, inputs_embeds, pixel_values, pixel_values_videos, image_grid_thw,

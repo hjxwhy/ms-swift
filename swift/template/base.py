@@ -225,6 +225,13 @@ class Template(ProcessorMixin):
                 resolved_extra.append(tid)
             elif token is not None:
                 resolved_extra.append(token)
+        # Protect the robot-state token from truncation: every surviving <|robot_state|> must keep
+        # its 1:1 correspondence with a robot_states vector (same reason media placeholders are
+        # protected). Resolved here only when the token is in the vocab (i.e. robot_state_dim was
+        # set); otherwise convert_tokens_to_ids returns unk and it is skipped.
+        robot_state_id = tokenizer.convert_tokens_to_ids('<|robot_state|>')
+        if robot_state_id is not None and robot_state_id != unk_id:
+            resolved_extra.append(robot_state_id)
         self.extra_truncate_protected_tokens = resolved_extra
         self.template_meta.init(tokenizer)
         self.init_env_args()
