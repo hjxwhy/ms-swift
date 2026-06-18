@@ -108,6 +108,14 @@ class StdTemplateInputs:
             if mm_data:
                 assert not inputs_mm_data, f'self.{k}: {inputs_mm_data}'
             else:
+                if k == 'videos':
+                    # Decode \x00-encoded frame lists (written by _normalize_videos_schema).
+                    # Trailing \x00 is always present to distinguish single-frame ["/a.jpg"]
+                    # (encoded as "/a.jpg\x00") from a plain MP4 path "video.mp4" (no \x00).
+                    inputs_mm_data = [
+                        [f for f in v.split('\x00') if f] if isinstance(v, str) and '\x00' in v else v
+                        for v in inputs_mm_data
+                    ]
                 media_kwargs[k] = inputs_mm_data
 
         all_keys = set(f.name for f in fields(StdTemplateInputs))

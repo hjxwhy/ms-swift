@@ -1,7 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 import numpy as np
 import os
-from datasets import load_from_disk
+from datasets import Sequence, load_from_disk
 
 from swift.dataset import DatasetSyntax, sample_dataset
 from swift.template import update_generation_config_eos_token
@@ -59,14 +59,29 @@ def _select_dataset(args, dataset):
         ]
         new_dataset = dataset.select(idxs)
     else:
-        new_dataset = dataset.map(
-            lambda rows: {'lengths': [[min(length, max_length) for length in lengths] for lengths in rows['lengths']]},
-            num_proc=args.dataset_num_proc,
-            load_from_cache_file=args.load_from_cache_file,
-            batched=True)
+        new_dataset = dataset
     if len(new_dataset) < len(dataset):
         logger.info(f'Dataset filtered, origin length: {len(dataset)}, filtered dataset length: {len(new_dataset)}')
     return new_dataset
+
+
+def _normalize_videos_schema(dataset):
+    """Normalize videos column from List(List(str)) to List(str) for schema-compatible concatenation.
+
+    Some cached datasets store frame-based videos as List(List(Value('string'))) (multiple image
+    paths per video entry). This encodes each inner list as a null-byte-joined string so all
+    datasets share the List(Value('string')) schema. Decoded back to lists in StdTemplateInputs.
+    """
+    if 'videos' not in dataset.features:
+        return dataset
+    feature = dataset.features['videos']
+    if isinstance(feature, Sequence) and isinstance(feature.feature, Sequence):
+        dataset = dataset.map(
+            lambda batch: {'videos': [['\x00'.join(v) + '\x00' for v in row] for row in batch['videos']]},
+            batched=True,
+            num_proc=1,
+        )
+    return dataset
 
 
 def get_cached_dataset(args):
@@ -78,7 +93,7 @@ def get_cached_dataset(args):
                 dataset_sample = None
             else:
                 path, dataset_sample = DatasetSyntax._safe_split(path, '#', True, 'right')
-            dataset = _select_dataset(args, load_from_disk(path))
+            dataset = _normalize_videos_schema(_select_dataset(args, load_from_disk(path)))
             if dataset_sample is not None:
                 dataset = sample_dataset(
                     dataset, int(dataset_sample), args.dataset_shuffle, random_state=random_state, shuffle_all=True)
