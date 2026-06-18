@@ -303,6 +303,321 @@ class MixERAllPreprocessor(RowPreprocessor):
 
 
 ROOT_IMAGE_DIR = os.environ.get('ROOT_IMAGE_DIR')
+
+# ---------------------------------------------------------------------------
+# Embodied-R1.5-SFT-Dataset helpers
+# ---------------------------------------------------------------------------
+
+ER15_BASE = '/cpfs01/cpfs01/datas/vlm_dataset/molmo2_er_datasets/Embodied-R1.5-SFT-Dataset'
+ROBOPOINT_IMGS = '/cpfs01/cpfs01/datas/molmo2_er_datasets/Molmo2-ER-RoboPoint/images'
+VG_IMGS = f'{ER15_BASE}/VisualGenome_VG_100K_1_and_2/VisualGenome_VG_100K_1_and_2'
+PACO_IMGS = f'{ER15_BASE}/PACO-LVIS/PACO-LVIS/Images'
+
+
+def _er15_simple(base_dir):
+    """Return a preprocessor for datasets where image/video field is a plain relative path."""
+    class _P(RowPreprocessor):
+        def preprocess(self, row):
+            msgs = _conv_to_messages(row['conversations'])
+            raw = row.get('images', [])
+            if isinstance(raw, str):
+                imgs = [os.path.join(base_dir, raw)]
+            else:
+                imgs = [os.path.join(base_dir, p) for p in raw]
+            if imgs and msgs:
+                needed = len(imgs) - msgs[0]['content'].count('<image>')
+                if needed > 0:
+                    msgs[0]['content'] = '<image>' * needed + msgs[0]['content']
+            return {'messages': msgs, 'images': imgs}
+    return _P()
+
+
+def _er15_multi_image(base_dir, strip_prefix=None):
+    """Preprocessor for datasets where image field is a list of relative paths (multi-image)."""
+    class _P(RowPreprocessor):
+        def preprocess(self, row):
+            msgs = _conv_to_messages(row['conversations'])
+            raw = row.get('images', [])
+            if isinstance(raw, str):
+                import ast
+                raw = ast.literal_eval(raw)
+            imgs = []
+            for p in raw:
+                if strip_prefix and p.startswith(strip_prefix):
+                    p = p[len(strip_prefix):]
+                imgs.append(os.path.join(base_dir, p))
+            if imgs and msgs:
+                needed = len(imgs) - msgs[0]['content'].count('<image>')
+                if needed > 0:
+                    msgs[0]['content'] = '<image>' * needed + msgs[0]['content']
+            return {'messages': msgs, 'images': imgs}
+    return _P()
+
+
+def _er15_frame_seq(base_dir):
+    """Preprocessor for datasets where video field is [[frame1, frame2, ...]] (frame sequence as video).
+    Conversation already contains <video> token; pass frames as videos list-of-lists so
+    Qwen2VLTemplate.replace_tag handles them via qwen_vl_utils.fetch_video list path."""
+    class _P(RowPreprocessor):
+        def preprocess(self, row):
+            msgs = _conv_to_messages(row['conversations'])
+            raw = row.get('videos', [[]])
+            frames = raw[0] if raw else []
+            frame_paths = [os.path.join(base_dir, f) for f in frames]
+            return {'messages': msgs, 'videos': [frame_paths]}
+    return _P()
+
+
+class EgoplanER15Preprocessor(RowPreprocessor):
+    """EgoPlan: video=[[frames...]] as <video>, image=[current_frame] as <image>.
+    Human value already contains '<video> <image>' — pass frames as videos list-of-lists
+    and current frame as images; no content modification needed.
+    """
+    def preprocess(self, row):
+        msgs = _conv_to_messages(row['conversations'])
+        base = f'{ER15_BASE}/EgoPlan-Data'
+        frames = row.get('videos', [[]])[0]
+        cur_raw = row.get('images', [])
+        frame_paths = [os.path.join(base, f) for f in frames]
+        cur_paths = [os.path.join(base, p) for p in cur_raw]
+        return {'messages': msgs, 'videos': [frame_paths], 'images': cur_paths}
+
+
+class RoboaffordPreprocessor(RowPreprocessor):
+    """roboafford: 4 JSONs share one preprocessor; image base depends on path prefix."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def preprocess(self, row):
+        msgs = _conv_to_messages(row['conversations'])
+        raw = row.get('images', '')
+        if raw.startswith('VG_100K'):
+            base = VG_IMGS
+        elif raw.startswith('train2017'):
+            base = PACO_IMGS
+        else:
+            base = ROBOPOINT_IMGS
+        imgs = [os.path.join(base, raw)]
+        if imgs and msgs and '<image>' not in msgs[0]['content']:
+            msgs[0]['content'] = '<image>' + msgs[0]['content']
+        return {'messages': msgs, 'images': imgs}
+
+
+class InstructPartPreprocessor(RowPreprocessor):
+    """InstructPart: images already have absolute paths; conversations already contain <image>."""
+    def preprocess(self, row):
+        msgs = _conv_to_messages(row['conversations'])
+        imgs = row.get('images', [])
+        if imgs and msgs and '<image>' not in msgs[0]['content']:
+            msgs[0]['content'] = '<image>' + msgs[0]['content']
+        return {'messages': msgs, 'images': imgs}
+
+
+class BridgeDataFailPreprocessor(RowPreprocessor):
+    """BridgeDataFail: JSON video field has only the first frame path.
+    Expand to all sorted frames in the same episode folder.
+    """
+    BASE = f'{ER15_BASE}/BridgeDataFail'
+
+    def preprocess(self, row):
+        msgs = _conv_to_messages(row['conversations'])
+        raw = row.get('videos', [[]])
+        first = raw[0][0] if raw and raw[0] else None
+        if not first:
+            return None
+        folder = os.path.join(self.BASE, os.path.dirname(first))
+        frames = sorted(glob.glob(os.path.join(folder, '*.png')))
+        if not frames:
+            return None
+        return {'messages': msgs, 'videos': [frames]}
+
+
+# ---------------------------------------------------------------------------
+# Embodied-R1.5-SFT-Dataset registrations
+# ---------------------------------------------------------------------------
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-bridge-data-fail',
+    dataset_path=f'{ER15_BASE}/BridgeDataFail/all_qa.json',
+    preprocess_func=BridgeDataFailPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-bridge-data-trace',
+    dataset_path=f'{ER15_BASE}/BridgeData-Trace/bridge_sharegpt.json',
+    preprocess_func=_er15_multi_image(f'{ER15_BASE}/BridgeData-Trace/bridge'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-cosyn-point',
+    dataset_path=f'{ER15_BASE}/CoSyn-point/CoSyn-point/cosyn_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/CoSyn-point/CoSyn-point'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-eo-data-s1',
+    dataset_path=f'{ER15_BASE}/EO-Data1.5M/EO-Data1.5M/eo_subset1_sharegpt_cleaned_new_0111.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/EO-Data1.5M/EO-Data1.5M'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-eo-data-s2',
+    dataset_path=f'{ER15_BASE}/EO-Data1.5M/EO-Data1.5M/eo_subset2_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/EO-Data1.5M/EO-Data1.5M'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-egoplan',
+    dataset_path=f'{ER15_BASE}/EgoPlan-Data/egoplan_frames_sharegpt_cleaned.json',
+    preprocess_func=EgoplanER15Preprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-mmif-sft',
+    dataset_path=f'{ER15_BASE}/MMIF-23k/mmif_sft_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/MMIF-23k/MMIF-23k/images'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-maniskill-fail',
+    dataset_path=f'{ER15_BASE}/ManiskillFail/ManiskillFail/qa_pairs_merged.json',
+    preprocess_func=_er15_frame_seq(f'{ER15_BASE}/ManiskillFail/ManiskillFail'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-prism',
+    dataset_path=f'{ER15_BASE}/PRISM/PRISM/output/sharegpt_prism_cleaned.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/PRISM/PRISM/output'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-robofac',
+    dataset_path=f'{ER15_BASE}/RoboFAC-dataset/robofac_sharegpt_normalized.json',
+    preprocess_func=_er15_frame_seq(f'{ER15_BASE}/RoboFAC-dataset/RoboFAC-dataset'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-sat-data',
+    dataset_path=f'{ER15_BASE}/SAT-Data/SAT-Data/train_sharegpt_shuffled.json',
+    preprocess_func=_er15_multi_image(f'{ER15_BASE}/SAT-Data/SAT-Data/images'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-droid',
+    dataset_path=f'{ER15_BASE}/droid-trajectory/droid_merged_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/droid-trajectory'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-er1-fsd',
+    dataset_path=f'{ER15_BASE}/er1-data/er1-data/fsd_train_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/er1-data/er1-data'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-er1-handal',
+    dataset_path=f'{ER15_BASE}/er1-data/er1-data/handal_train_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/er1-data/er1-data'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-er1-roborefit',
+    dataset_path=f'{ER15_BASE}/er1-data/er1-data/roborefit_train_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/er1-data/er1-data'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-er1-train',
+    dataset_path=f'{ER15_BASE}/er1-data/er1-data/train_sharegpt.json',
+    preprocess_func=_er15_multi_image(f'{ER15_BASE}/er1-data/er1-data/FSD-Trace/images'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-euclid',
+    dataset_path=f'{ER15_BASE}/euclid-30k/euclid-30k/Euclid30K_train_sharegpt_filtered.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/euclid-30k/euclid-30k'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-hoi4d',
+    dataset_path=f'{ER15_BASE}/hoi4d/hoi4d/hoi4d_trajectory_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/hoi4d/hoi4d'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-interndata',
+    dataset_path=f'{ER15_BASE}/interndata/interndata/sharegpt_interndata_m1.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/interndata/interndata'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-llava',
+    dataset_path=f'{ER15_BASE}/llava_v1_5_mix665k/llava_v1_5_mix665k/dataset_sharegpt_cleaned_filtered.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/llava_v1_5_mix665k/llava_v1_5_mix665k'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-ref-l4',
+    dataset_path=f'{ER15_BASE}/ref_l4/ref_l4/ref_l4_sharegpt.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/ref_l4'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-regular-sim',
+    dataset_path=f'{ER15_BASE}/regular/regular/outputs/regular-simulation.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/regular/regular/outputs'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-regular-synth',
+    dataset_path=f'{ER15_BASE}/regular/regular/generate_synthetic/regular_synthetic.json',
+    preprocess_func=_er15_simple(
+        f'{ER15_BASE}/regular/regular/generate_synthetic/dataset_pattern_completion_normalized_grid/rl'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-robo2vlm',
+    dataset_path=f'{ER15_BASE}/robo2vlm/robo2vlm/robo2vlm_sharegpt_new_0111.json',
+    preprocess_func=_er15_simple(f'{ER15_BASE}/robo2vlm/robo2vlm'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-roboafford-obj',
+    dataset_path=f'{ER15_BASE}/roboafford/roboafford/object_ref_max_points_10_normalized_sharegpt.json',
+    preprocess_func=RoboaffordPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-roboafford-region',
+    dataset_path=f'{ER15_BASE}/roboafford/roboafford/region_ref_max_points_10_normalized_sharegpt.json',
+    preprocess_func=RoboaffordPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-roboafford-vg',
+    dataset_path=f'{ER15_BASE}/roboafford/roboafford/VG_normalized_sharegpt.json',
+    preprocess_func=RoboaffordPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-roboafford-paco',
+    dataset_path=f'{ER15_BASE}/roboafford/roboafford/paco_lvis_normalized_sharegpt_v2_filtered.json',
+    preprocess_func=RoboaffordPreprocessor(),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-robovqa',
+    dataset_path=f'{ER15_BASE}/robovqa/robovqa/robovqa_train_sharegpt.json',
+    preprocess_func=_er15_multi_image(f'{ER15_BASE}/robovqa/robovqa', strip_prefix='robovqa_train/'),
+))
+
+register_dataset(DatasetMeta(
+    dataset_name='er15-instruct-part',
+    dataset_path=f'{ER15_BASE}/InstructPart/InstructPart/instructpart_sharegpt.json',
+    preprocess_func=InstructPartPreprocessor(),
+))
+
 register_dataset(DatasetMeta(
     dataset_name='molmo2-er-clevr',
     dataset_path=f'{ROOT_IMAGE_DIR}/{BASE}/Molmo2-ER-CLEVR/CLEVR_v1.0/questions/CLEVR_train_questions.json',
@@ -390,4 +705,26 @@ register_dataset(DatasetMeta(
     dataset_path='/cpfs01/cpfs01/datas/vlm_dataset/molmo2_er_datasets/Mix-ER-All/*.jsonl',
     preprocess_func=MixERAllPreprocessor(),
     loader=MixERAllLoader,
+))
+
+MINDCUBE_BASE = '/cpfs01/cpfs01/datas/vlm_dataset/molmo2_er_datasets/MindCube/data'
+
+
+class MindCubePreprocessor(RowPreprocessor):
+    def preprocess(self, row):
+        imgs = [os.path.join(MINDCUBE_BASE, p) for p in row.get('images', [])]
+        question = row['question']
+        answer = row['gt_answer']
+        content = '<image>' * len(imgs) + question
+        return {
+            'messages': [{'role': 'user', 'content': content},
+                         {'role': 'assistant', 'content': answer}],
+            'images': imgs,
+        }
+
+
+register_dataset(DatasetMeta(
+    dataset_name='mindcube',
+    dataset_path=f'{MINDCUBE_BASE}/raw/MindCube_train.jsonl',
+    preprocess_func=MindCubePreprocessor(),
 ))
