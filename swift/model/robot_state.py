@@ -1,4 +1,5 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
+import inspect
 import json
 import os
 from functools import wraps
@@ -110,7 +111,13 @@ def _prepare_robot_state_inputs(model: nn.Module, kwargs: Dict) -> Dict:
                 if not _has_model_managed_mm_inputs(kwargs):
                     kwargs.pop('input_ids', None)
             if inputs_embeds is not None:
-                kwargs['inputs_embeds'] = inputs_embeds + sum(p.sum() * 0 for p in projector.parameters())
+                # Run projector on a dummy zero input so the backward graph has the same MLP-chain
+                # topology (W2→SiLU→W1) as ranks that DO run the real projector forward.  Using a
+                # flat `sum(p.sum()*0)` anchor creates a different gradient-bucket-fire order across
+                # ranks, causing DeepSpeed ZeRO-2 AllReduce desynchronization and NCCL timeout.
+                projector_param = next(projector.parameters())
+                dummy = torch.zeros(1, projector_param.shape[-1], device=projector_param.device, dtype=projector_param.dtype)
+                kwargs['inputs_embeds'] = inputs_embeds + projector(dummy).sum() * 0
         return kwargs
 
     if projector is None:
@@ -121,19 +128,39 @@ def _prepare_robot_state_inputs(model: nn.Module, kwargs: Dict) -> Dict:
     if token_id is None:
         raise ValueError('model.config.robot_state_token_id is required when robot_states are provided.')
 
-    if inputs_embeds is None:
-        inputs_embeds = get_llm_input_embeddings(model)(input_ids)
-        kwargs['inputs_embeds'] = inputs_embeds
-        if not _has_model_managed_mm_inputs(kwargs):
-            kwargs.pop('input_ids', None)
-
     state_mask = input_ids == token_id
     num_state_tokens = int(state_mask.sum().item())
+    # On KV-cache steps during generate(), input_ids is just the last generated token — no robot_state
+    # tokens present. Skip injection silently; embeddings were already patched on the first step.
+    if num_state_tokens == 0:
+        # During training this branch fires when robot_states were provided by the collator but no
+        # <|robot_state|> tokens remain in input_ids (e.g. packing edge-case). The projector must
+        # still participate in the backward pass with the same graph topology as ranks that do run
+        # it; otherwise grad=None breaks DeepSpeed ZeRO-2 AllReduce → NCCL timeout.
+        if model.training:
+            if inputs_embeds is None:
+                inputs_embeds = get_llm_input_embeddings(model)(input_ids)
+                kwargs['inputs_embeds'] = inputs_embeds
+                if not _has_model_managed_mm_inputs(kwargs):
+                    kwargs.pop('input_ids', None)
+            if inputs_embeds is not None:
+                projector_param = next(projector.parameters())
+                dummy = torch.zeros(1, projector_param.shape[-1], device=projector_param.device, dtype=projector_param.dtype)
+                kwargs['inputs_embeds'] = inputs_embeds + projector(dummy).sum() * 0
+        return kwargs
     if num_state_tokens != robot_states.shape[0]:
         raise ValueError(
             f'robot state token count({num_state_tokens}) does not match robot_states count({robot_states.shape[0]}).')
-    if num_state_tokens == 0:
-        return kwargs
+
+    if inputs_embeds is None:
+        inputs_embeds = get_llm_input_embeddings(model)(input_ids)
+        kwargs['inputs_embeds'] = inputs_embeds
+        # Keep input_ids when visual MM inputs are present so the inner model (Qwen3VLModel /
+        # _compat_qwen3_vl_mixed_data) can use it for visual feature placement via input_ids
+        # masking instead of embed_tokens comparison (which causes device mismatch on multi-GPU).
+        # When no MM inputs: always remove input_ids (inner model rejects having both).
+        if not _has_model_managed_mm_inputs(kwargs):
+            kwargs.pop('input_ids', None)
 
     projector_param = next(projector.parameters())
     state_embeds = projector(robot_states.to(device=projector_param.device, dtype=projector_param.dtype))
@@ -152,6 +179,23 @@ def patch_robot_state_forward(model: nn.Module) -> None:
     def forward(self, *args, **kwargs):
         kwargs = _prepare_robot_state_inputs(self, kwargs)
         return origin_forward(*args, **kwargs)
+
+    # Extend the __signature__ so HuggingFace generate()'s _validate_model_kwargs accepts
+    # robot_states and robot_state_counts without raising "not used by the model".
+    try:
+        orig_sig = inspect.signature(origin_forward)
+        params = list(orig_sig.parameters.values())
+        var_kw_idx = next(
+            (i for i, p in enumerate(params) if p.kind == inspect.Parameter.VAR_KEYWORD), len(params))
+        extra = [
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in ('robot_states', 'robot_state_counts')
+            if name not in orig_sig.parameters
+        ]
+        if extra:
+            forward.__signature__ = orig_sig.replace(parameters=params[:var_kw_idx] + extra + params[var_kw_idx:])
+    except (ValueError, TypeError):
+        pass
 
     model.forward = MethodType(forward, model)
     model._robot_state_forward_patched = True

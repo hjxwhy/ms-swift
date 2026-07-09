@@ -168,8 +168,10 @@ _VIDEO_FRAME_RE = re.compile(r'^(?P<path>.+\.(?:mp4|mkv|avi|webm|mov)):(?P<ts>\d
 def _load_video_frame(path: str, timestamp: float) -> Image.Image:
     """Decode a single frame at ``timestamp`` (seconds) from a video file into a PIL image."""
     from lerobot.datasets.video_utils import decode_video_frames
-    tolerance_s = get_env_args('video_frame_tolerance_s', float, 1.0)
-    backend = get_env_args('video_load_backend', str, None)
+    # tolerance_s = get_env_args('video_frame_tolerance_s', float, 1.0)
+    # backend = get_env_args('video_load_backend', str, None)
+    tolerance_s = 0.1
+    backend = "torchcodec"
     frame = decode_video_frames(path, [timestamp], tolerance_s, backend=backend)[0]
     array = (frame * 255).round().to(torch.uint8).permute(1, 2, 0).numpy()
     return Image.fromarray(array).convert('RGB')

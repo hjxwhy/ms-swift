@@ -1015,19 +1015,27 @@ def _compat_qwen3_vl_mixed_data(model, processor, is_moe: bool = False):
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, output_cls]:
         if not self.training or not is_deepspeed_enabled():
-            return self.origin_forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                pixel_values=pixel_values,
-                pixel_values_videos=pixel_values_videos,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                cache_position=cache_position,
-                **kwargs,
-            )
+            # When both input_ids and inputs_embeds are present alongside visual inputs, robot
+            # states have been injected into inputs_embeds but visual features still need merging.
+            # Use the training-style visual path (_forward_qwen3_vl_or_qwen3_omni) which uses
+            # input_ids for image/video masking — avoids the embed_tokens device mismatch that
+            # get_placeholder_mask triggers on multi-GPU when input_ids=None.
+            if input_ids is None or inputs_embeds is None or (pixel_values is None
+                                                               and pixel_values_videos is None):
+                return self.origin_forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    cache_position=cache_position,
+                    **kwargs,
+                )
+            # Fall through to the visual-merging path below.
 
         # This patched forward threads input_ids through for the visual masks and get_rope_index
         # even when inputs_embeds is precomputed upstream (e.g. the robot_state projector scatters

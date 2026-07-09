@@ -17,7 +17,9 @@ from swift.dataset.register import register_dataset
 #   --dataset /cpfs01/cpfs01/datas/vlm_dataset/pretrain_vlm_action_mask_tokens_hf:action
 # or all subsets with `:all`.
 PRETRAIN_VLM_ACTION_DIR = '/cpfs01/cpfs01/datas/vlm_dataset/pretrain_vlm_action_mask_tokens_hf'
+PRETRAIN_VLM_ACTION_DIR_UNITREE = '/cpfs01/cpfs01/datas/vlm_dataset/pretrain_vlm_action_mask_tokens_unitree_hf_v2'
 PRETRAIN_VLM_ACTION_SUBSETS = ['action', 'gpm', 'idm', 'it2vm', 'sp', 'vpm']
+PRETRAIN_VLM_ACTION_SUBSETS_UNITREE = ['action', 'gpm', 'it2vm', 'vpm']
 
 
 class VLAParquetLoader(DatasetLoader):
@@ -62,6 +64,15 @@ class VLAParquetLoader(DatasetLoader):
             datasets.append(dataset)
         return self.concat_datasets(datasets)
 
+
+register_dataset(
+    DatasetMeta(
+        dataset_name='pretrain-vlm-action-unitree',
+        dataset_path=PRETRAIN_VLM_ACTION_DIR_UNITREE,
+        subsets=PRETRAIN_VLM_ACTION_SUBSETS_UNITREE,
+        loader=DatasetLoader,
+        tags=['vla', 'robotics', 'multimodal'],
+    ))
 
 register_dataset(
     DatasetMeta(

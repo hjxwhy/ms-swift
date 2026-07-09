@@ -361,6 +361,11 @@ class Template(ProcessorMixin):
                 for i, media_file in enumerate(media_list):
                     if isinstance(media_file, str) and not media_file.startswith('http'):
                         media_list[i] = _check_path(media_file) or media_file
+                    elif isinstance(media_file, (list, tuple)):
+                        media_list[i] = [
+                            (_check_path(f) or f) if isinstance(f, str) and not f.startswith('http') else f
+                            for f in media_file
+                        ]
 
         if self.mode == 'vllm' and inputs.audios:
             sampling_rate = get_env_args('sampling_rate', int, None)
