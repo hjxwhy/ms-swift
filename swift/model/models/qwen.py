@@ -903,7 +903,7 @@ def _forward_qwen3_vl_or_qwen3_omni(
     if pixel_values is None and pixel_values_videos is None:  # plain-text
         images = [Image.new('RGB', (32, 32), (0, 0, 0))]
         media_inputs = processor.image_processor(images=images, return_tensors='pt')
-        media_inputs = to_device(media_inputs, input_ids.device)
+        media_inputs = to_device(media_inputs, inputs_embeds.device if input_ids is None else input_ids.device)
         pixel_values = media_inputs['pixel_values'].type(dtype)
         visual_res = self.visual(pixel_values, grid_thw=media_inputs['image_grid_thw'])
         if hasattr(visual_res, 'pooler_output'):
